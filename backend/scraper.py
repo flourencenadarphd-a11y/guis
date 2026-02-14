@@ -45,22 +45,29 @@ class UniversityScraper:
         return list(set(cleaned))  # Remove duplicates
     
     def _fetch_from_wikipedia(self, country: str) -> List[str]:
-        """Fetch universities from Wikipedia - IMPROVED to get ALL universities"""
+        """Fetch universities from Wikipedia - IMPROVED with better error handling"""
         universities = set()
         try:
             # Wikipedia list format: "List of universities in [Country]"
+            # Try multiple variations
+            country_clean = country.replace(' ', '_').replace(',', '').strip()
             search_terms = [
-                f"List_of_universities_in_{country.replace(' ', '_')}",
-                f"List_of_universities_and_colleges_in_{country.replace(' ', '_')}",
-                f"Universities_in_{country.replace(' ', '_')}",
-                f"List_of_higher_education_institutions_in_{country.replace(' ', '_')}"
+                f"List_of_universities_in_{country_clean}",
+                f"List_of_universities_and_colleges_in_{country_clean}",
+                f"Universities_in_{country_clean}",
+                f"List_of_higher_education_institutions_in_{country_clean}",
+                f"List_of_universities_in_{country_clean.replace('_', ' ')}",  # Try with spaces
             ]
+            
+            logger.info(f"Searching Wikipedia for universities in {country}")
             
             for term in search_terms:
                 url = f"https://en.wikipedia.org/wiki/{term}"
+                logger.info(f"Trying URL: {url}")
                 try:
                     response = self._make_request(url)
                     if response and response.status_code == 200:
+                        logger.info(f"Successfully fetched: {url}")
                         soup = BeautifulSoup(response.content, 'html.parser')
                         
                         # Method 1: Find ALL tables (not just wikitable class)
@@ -123,13 +130,44 @@ class UniversityScraper:
                         if universities:
                             logger.info(f"Found {len(universities)} universities from {term}")
                             break  # Found universities, no need to try other terms
+                    else:
+                        logger.warning(f"Failed to fetch {url}: Status {response.status_code if response else 'No response'}")
                 except Exception as e:
                     logger.warning(f"Error fetching from Wikipedia for {term}: {e}")
                     continue
+            
+            # If no results, try alternative method: search Wikipedia directly
+            if not universities:
+                logger.info("No results from list pages, trying alternative search method...")
+                universities = self._search_wikipedia_alternative(country)
+            
+            logger.info(f"Total universities found: {len(universities)}")
         except Exception as e:
             logger.error(f"Error in Wikipedia fetch: {e}")
         
         return list(universities)
+    
+    def _search_wikipedia_alternative(self, country: str) -> set:
+        """Alternative method: search Wikipedia for university pages"""
+        universities = set()
+        try:
+            # Try searching for individual university pages
+            search_url = f"https://en.wikipedia.org/wiki/Special:Search/{country}_university"
+            response = self._make_request(search_url)
+            if response and response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'html.parser')
+                # Find search results
+                results = soup.find_all('div', class_='mw-search-result')
+                for result in results:
+                    title = result.find('a')
+                    if title:
+                        name = title.get_text(strip=True)
+                        if 'university' in name.lower() or 'college' in name.lower():
+                            universities.add(name)
+        except Exception as e:
+            logger.warning(f"Alternative search failed: {e}")
+        
+        return universities
     
     def _fetch_country_specific(self, country: str) -> List[str]:
         """Fetch from country-specific education portals"""

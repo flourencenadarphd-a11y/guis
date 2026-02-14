@@ -22,8 +22,8 @@ class Translator:
     
     def translate(self, text: str, source_lang: Optional[str] = None) -> str:
         """
-        Translate text to English
-        Returns original text if already in English or translation fails
+        Translate text to English - ALWAYS ATTEMPTS TRANSLATION
+        Returns original text only if translation fails or already English
         """
         if not text:
             return text
@@ -32,39 +32,87 @@ class Translator:
         if text in self.cache:
             return self.cache[text]
         
-        # Check if already English
-        if self._is_english(text):
-            self.cache[text] = text
-            return text
+        # Check if already English (but still try translation for accuracy)
+        is_english = self._is_english(text)
         
-        # Try translation
+        # ALWAYS try translation (even if seems English, to ensure accuracy)
         try:
             if self.use_gemini and self.gemini_api_key:
                 translated = self._translate_with_gemini(text)
             else:
                 translated = self._translate_with_google(text, source_lang)
             
-            if translated and translated != text:
+            # If translation succeeded and is different
+            if translated and translated.strip() and translated.lower() != text.lower():
+                self.cache[text] = translated
+                logger.info(f"Translated: '{text}' -> '{translated}'")
+                return translated
+            elif translated and translated.strip():
+                # Translation returned same or similar - might be English
                 self.cache[text] = translated
                 return translated
             else:
-                # Translation failed or same, return original
+                # Translation failed
+                if is_english:
+                    # Likely English, return original
+                    self.cache[text] = text
+                    return text
+                else:
+                    # Not English but translation failed - log and return original
+                    logger.warning(f"Translation failed for '{text}', returning original")
+                    self.cache[text] = text
+                    return text
+        except Exception as e:
+            logger.warning(f"Translation error for '{text}': {e}")
+            # If seems English, return original; otherwise log error
+            if is_english:
                 self.cache[text] = text
                 return text
-        except Exception as e:
-            logger.warning(f"Translation failed for '{text}': {e}")
-            self.cache[text] = text
-            return text
+            else:
+                logger.error(f"Could not translate non-English text '{text}': {e}")
+                self.cache[text] = text
+                return text
     
     def _is_english(self, text: str) -> bool:
-        """Simple check if text is likely English"""
-        # Check for common English words in university names
-        english_indicators = [
-            'university', 'college', 'institute', 'school', 'academy',
-            'of', 'the', 'and', 'for', 'in', 'at'
-        ]
+        """Check if text is likely English - IMPROVED"""
+        # Use langdetect for better accuracy
+        try:
+            from langdetect import detect, LangDetectException
+            try:
+                detected_lang = detect(text)
+                return detected_lang == 'en'
+            except LangDetectException:
+                # If detection fails, check for non-English characters
+                pass
+        except ImportError:
+            # Fallback if langdetect not available
+            pass
+        
+        # Check for non-English characters (more reliable)
         text_lower = text.lower()
-        return any(indicator in text_lower for indicator in english_indicators)
+        # Common non-English characters/patterns
+        non_english_patterns = [
+            'ä', 'ö', 'ü', 'ß',  # German
+            'é', 'è', 'ê', 'ë', 'à', 'â', 'ç',  # French
+            'á', 'é', 'í', 'ó', 'ú', 'ñ',  # Spanish
+            'č', 'ć', 'đ', 'š', 'ž',  # Slavic
+            'å', 'æ', 'ø',  # Nordic
+        ]
+        
+        # If contains non-English characters, likely not English
+        if any(char in text for char in non_english_patterns):
+            return False
+        
+        # Check if it's clearly English (all ASCII, common English words)
+        english_indicators = ['university', 'college', 'institute', 'school', 'academy']
+        has_english_word = any(indicator in text_lower for indicator in english_indicators)
+        
+        # If has English word AND no non-English characters, likely English
+        if has_english_word and all(ord(c) < 128 for c in text):
+            return True
+        
+        # Default: try to translate (assume not English)
+        return False
     
     def _translate_with_google(self, text: str, source_lang: Optional[str] = None) -> Optional[str]:
         """Translate using Google Translator (deep_translator)"""

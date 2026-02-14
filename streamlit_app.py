@@ -149,11 +149,18 @@ def fetch_universities(country: str):
                 # Update status
                 status_container.info(f"🔄 Processing: {name[:60]}... ({idx+1}/{total})")
                 
-                # Translate
+                # Translate (ALWAYS translate, even if seems English)
                 translated = translator.translate(name)
+                
+                # Log translation for debugging
+                if translated == name:
+                    logger.info(f"Translation kept same: '{name}' (may be English or translation failed)")
+                else:
+                    logger.info(f"Translation: '{name}' -> '{translated}'")
                 
                 # Check gotouniversity (IMPROVED ACCURACY)
                 exists, matched_name, similarity = goto_uni_checker.check_exists(translated)
+                logger.info(f"GotoUni check: {translated} -> exists={exists}, similarity={similarity:.2f}")
                 
                 # Store in database
                 if session:
@@ -261,10 +268,29 @@ def search_programs(country: str, course: str):
                     except:
                         delivery_mode, mode_confidence = "offline", 0.0
                     
-                    # Classify
+                    # Classify (ML + Rule-based)
                     try:
-                        level, ml_confidence = ml_classifier.classify(link_info.get('title', course))
-                    except:
+                        # Get page content snippet for better ML classification
+                        page_snippet = None
+                        try:
+                            from backend.scraper import CourseScraper
+                            temp_scraper = CourseScraper()
+                            response = temp_scraper._make_request(url)
+                            if response and response.status_code == 200:
+                                from bs4 import BeautifulSoup
+                                soup = BeautifulSoup(response.content, 'html.parser')
+                                page_snippet = soup.get_text()[:500]  # First 500 chars
+                        except:
+                            pass
+                        
+                        # Use ML classifier with page content
+                        level, ml_confidence = ml_classifier.classify(
+                            link_info.get('title', course),
+                            page_content_snippet=page_snippet
+                        )
+                        logger.info(f"ML Classification: '{link_info.get('title', course)}' -> {level} (confidence: {ml_confidence:.2f})")
+                    except Exception as e:
+                        logger.warning(f"Classification error: {e}")
                         level, ml_confidence = 'UG', 0.5
                     
                     # Get metadata
