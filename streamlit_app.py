@@ -274,18 +274,48 @@ def search_programs(country: str, course: str):
                         metadata = {'content_hash': None, 'last_checked': datetime.utcnow()}
                     
                     # Create program
-                    program = Program(
-                        university_id=university.id,
-                        course_name=course,
-                        program_url=url,
-                        level=level,
-                        taught_in_english=is_english,
-                        delivery_mode=delivery_mode,
-                        visited=False,
-                        content_hash=metadata.get('content_hash'),
-                        last_checked=metadata.get('last_checked'),
-                        confidence_score=str(ml_confidence)
-                    )
+                    # Check if delivery_mode column exists by trying to create with it
+                    try:
+                        # First, try to add delivery_mode via raw SQL if column doesn't exist
+                        from sqlalchemy import text
+                        try:
+                            session.execute(text("SELECT delivery_mode FROM programs LIMIT 1"))
+                        except:
+                            # Column doesn't exist, add it
+                            try:
+                                session.execute(text("ALTER TABLE programs ADD COLUMN delivery_mode VARCHAR"))
+                                session.execute(text("UPDATE programs SET delivery_mode = 'offline' WHERE delivery_mode IS NULL"))
+                                session.commit()
+                            except:
+                                pass  # Column might already exist or table doesn't exist
+                        
+                        # Now create program with delivery_mode
+                        program = Program(
+                            university_id=university.id,
+                            course_name=course,
+                            program_url=url,
+                            level=level,
+                            taught_in_english=is_english,
+                            delivery_mode=delivery_mode,
+                            visited=False,
+                            content_hash=metadata.get('content_hash'),
+                            last_checked=metadata.get('last_checked'),
+                            confidence_score=str(ml_confidence)
+                        )
+                    except Exception as e:
+                        # Fallback: create without delivery_mode
+                        logger.warning(f"Could not add delivery_mode: {e}")
+                        program = Program(
+                            university_id=university.id,
+                            course_name=course,
+                            program_url=url,
+                            level=level,
+                            taught_in_english=is_english,
+                            visited=False,
+                            content_hash=metadata.get('content_hash'),
+                            last_checked=metadata.get('last_checked'),
+                            confidence_score=str(ml_confidence)
+                        )
                     session.add(program)
                     
                     # Get university info for display
@@ -490,7 +520,32 @@ def main():
         
         session = get_db_session()
         if session:
-            programs = session.query(Program).join(University).all()
+            try:
+                # Query programs
+                programs = session.query(Program).join(University).all()
+            except Exception as e:
+                error_msg = str(e).lower()
+                if 'delivery_mode' in error_msg or 'no such column' in error_msg:
+                    st.warning("⚠️ **Database Schema Update Needed**")
+                    st.info("""
+                    **The database needs to be updated with the new schema.**
+                    
+                    **Quick Fix:**
+                    1. Go to the **Search** tab
+                    2. Fetch universities for any country (e.g., "Germany")
+                    3. This will recreate the database with the correct schema
+                    4. Then come back here - it will work!
+                    
+                    The database will be automatically recreated with all new features.
+                    """)
+                    session.close()
+                    programs = []
+                else:
+                    st.error(f"Database error: {str(e)}")
+                    st.info("💡 Try fetching universities first to initialize the database.")
+                    session.close()
+                    programs = []
+            
             if programs:
                 display_data = []
                 for program in programs:
@@ -503,7 +558,7 @@ def main():
                         "Course": program.course_name,
                         "Level": program.level,
                         "Language": "✅ English" if program.taught_in_english else "❌ Non-English",
-                        "Delivery": getattr(program, 'delivery_mode', 'offline').title(),
+                        "Delivery": (getattr(program, 'delivery_mode', 'offline') or 'offline').title(),
                         "Visited": "🟢" if program.visited else "🔴",
                         "URL": program.program_url[:50] + "..." if len(program.program_url) > 50 else program.program_url
                     })

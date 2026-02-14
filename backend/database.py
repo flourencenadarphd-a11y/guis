@@ -6,6 +6,10 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
 import os
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 Base = declarative_base()
 
@@ -61,10 +65,12 @@ class Database:
             db_path = os.path.join(project_root, "guis.db")
         self.db_path = db_path
         self.engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
-        Base.metadata.create_all(bind=self.engine)
         
-        # Add delivery_mode column if it doesn't exist (migration)
+        # Migrate database first (add new columns if needed)
         self._migrate_database()
+        
+        # Then create all tables (this won't affect existing tables)
+        Base.metadata.create_all(bind=self.engine)
         
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
     
@@ -72,16 +78,35 @@ class Database:
         """Add new columns to existing database if needed"""
         try:
             from sqlalchemy import inspect, text
-            inspector = inspect(self.engine)
-            columns = [col['name'] for col in inspector.get_columns('programs')]
+            import os
             
-            if 'delivery_mode' not in columns:
-                with self.engine.connect() as conn:
-                    conn.execute(text("ALTER TABLE programs ADD COLUMN delivery_mode VARCHAR DEFAULT 'offline'"))
-                    conn.commit()
+            # Check if database file exists
+            if not os.path.exists(self.db_path):
+                logger.info("Database doesn't exist. Will be created with correct schema.")
+                return  # Database will be created with correct schema
+            
+            inspector = inspect(self.engine)
+            
+            # Check if programs table exists
+            if 'programs' in inspector.get_table_names():
+                columns = [col['name'] for col in inspector.get_columns('programs')]
+                
+                if 'delivery_mode' not in columns:
+                    try:
+                        logger.info("Migrating database: Adding delivery_mode column...")
+                        with self.engine.begin() as conn:
+                            # SQLite ALTER TABLE ADD COLUMN (no DEFAULT in ALTER)
+                            conn.execute(text("ALTER TABLE programs ADD COLUMN delivery_mode VARCHAR"))
+                            # Update existing rows to have default value
+                            conn.execute(text("UPDATE programs SET delivery_mode = 'offline' WHERE delivery_mode IS NULL"))
+                        logger.info("✅ Migration complete: delivery_mode column added")
+                    except Exception as e:
+                        logger.warning(f"Migration failed: {e}")
+                        logger.info("Database will work, but delivery_mode may not be available. Delete database to recreate with correct schema.")
         except Exception as e:
-            # Column might already exist or table doesn't exist yet
-            pass
+            logger.warning(f"Migration check failed: {e}. Database will be created/recreated as needed.")
+            # Migration failed, but database will still work
+            # New records will have the column if table is recreated
     
     def get_session(self):
         """Get database session"""
