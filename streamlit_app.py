@@ -108,7 +108,7 @@ def get_db_session():
     return None
 
 def fetch_universities(country: str):
-    """Fetch universities for a country"""
+    """Fetch universities for a country - REAL-TIME UPDATES"""
     if not university_scraper or not translator or not goto_uni_checker:
         return None, "Backend not initialized"
     
@@ -125,60 +125,69 @@ def fetch_universities(country: str):
                     "exists_in_gotouniversity": u.exists_in_gotouniversity
                 } for u in existing], f"Found {len(existing)} universities in database"
         
-        # Fetch new universities
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+        # Create real-time display container
+        status_container = st.empty()
+        results_container = st.empty()
+        universities = []
         
-        status_text.text("🔍 Searching Wikipedia and education portals...")
-        progress_bar.progress(10)
+        status_container.info("🔍 Searching Wikipedia and education portals...")
         
         university_names = university_scraper.fetch_universities(country)
         
         if not university_names:
             if session:
                 session.close()
+            status_container.empty()
             return None, f"No universities found for {country}. Try a different country name or check spelling."
         
-        status_text.text(f"📝 Found {len(university_names)} universities. Processing...")
-        progress_bar.progress(30)
+        total = len(university_names)
+        status_container.info(f"📝 Found {total} universities. Processing in real-time...")
         
-        universities = []
-        total = len(university_names)  # Process ALL universities
-        
+        # Process and display in real-time
         for idx, name in enumerate(university_names):
             try:
-                status_text.text(f"🔄 Processing: {name[:50]}... ({idx+1}/{total})")
-                progress_bar.progress(30 + int((idx / total) * 50))
+                # Update status
+                status_container.info(f"🔄 Processing: {name[:60]}... ({idx+1}/{total})")
                 
+                # Translate
                 translated = translator.translate(name)
+                
+                # Check gotouniversity (IMPROVED ACCURACY)
                 exists, matched_name, similarity = goto_uni_checker.check_exists(translated)
                 
+                # Store in database
                 if session:
                     university = University(
-                        original_name=name,
-                        translated_name=translated,
+                        original_name=name,  # ORIGINAL NAME
+                        translated_name=translated,  # TRANSLATED NAME
                         country=country,
                         exists_in_gotouniversity=exists
                     )
                     session.add(university)
-                    universities.append({
-                        "original_name": name,
-                        "translated_name": translated,
-                        "exists_in_gotouniversity": exists
-                    })
+                    session.commit()  # Commit immediately for real-time
+                
+                # Add to results
+                uni_data = {
+                    "original_name": name,  # ORIGINAL
+                    "translated_name": translated,  # TRANSLATED
+                    "exists_in_gotouniversity": exists
+                }
+                universities.append(uni_data)
+                
+                # Display in real-time
+                df = pd.DataFrame(universities)
+                results_container.dataframe(df, width='stretch', hide_index=True)
+                
             except Exception as e:
                 logger.warning(f"Error processing {name}: {e}")
                 continue
         
         if session:
-            session.commit()
             session.close()
         
-        progress_bar.progress(100)
-        status_text.text("✅ Complete!")
-        time.sleep(0.5)
-        progress_bar.empty()
-        status_text.empty()
+        status_container.success(f"✅ Complete! Processed {len(universities)} universities")
+        time.sleep(1)
+        status_container.empty()
         
         return universities, f"✅ Successfully fetched and processed {len(universities)} universities"
     except Exception as e:
@@ -187,7 +196,7 @@ def fetch_universities(country: str):
         return None, f"Error: {str(e)}"
 
 def search_programs(country: str, course: str):
-    """Search for programs"""
+    """Search for programs - REAL-TIME, ONE UNIVERSITY AT A TIME"""
     if not course_scraper or not language_detector or not ml_classifier:
         return None, "Backend not initialized"
     
@@ -202,28 +211,34 @@ def search_programs(country: str, course: str):
             return None, f"No universities found for {country}. Please fetch universities first."
         
         programs_found = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+        status_container = st.empty()
+        results_container = st.empty()
         
-        total_unis = len(universities)  # Process ALL universities
+        total_unis = len(universities)
+        status_container.info(f"🔍 Searching {total_unis} universities. Processing one at a time...")
         
+        # Process ONE university at a time, complete ALL links before moving to next
         for idx, university in enumerate(universities):
             try:
-                uni_name = university.translated_name or university.original_name
-                status_text.text(f"🔍 Searching {uni_name[:50]}... ({idx+1}/{total_unis})")
-                progress_bar.progress(int((idx / total_unis) * 50))
+                uni_original = university.original_name  # ORIGINAL NAME
+                uni_translated = university.translated_name or university.original_name
+                in_gotouni = university.exists_in_gotouniversity
                 
-                course_links = course_scraper.search_courses(
-                    uni_name,
-                    course
-                )
+                # Update status
+                status_container.info(f"🔍 [{idx+1}/{total_unis}] Searching: {uni_original[:60]}...")
+                
+                # Search for courses
+                course_links = course_scraper.search_courses(uni_translated, course)
                 
                 if not course_links:
+                    status_container.warning(f"⚠️ [{idx+1}/{total_unis}] No links found for {uni_original[:50]}")
                     continue
                 
-                status_text.text(f"✅ Found {len(course_links)} links. Processing...")
+                status_container.info(f"✅ [{idx+1}/{total_unis}] Found {len(course_links)} links for {uni_original[:50]}. Processing all links...")
                 
-                for link_info in course_links:  # Process ALL links
+                # Process ALL links for this university before moving to next
+                uni_programs = []
+                for link_idx, link_info in enumerate(course_links):
                     url = link_info['url']
                     
                     # Check if exists
@@ -231,13 +246,16 @@ def search_programs(country: str, course: str):
                     if existing:
                         continue
                     
+                    # Update link status
+                    status_container.info(f"🔗 [{idx+1}/{total_unis}] Processing link {link_idx+1}/{len(course_links)}: {url[:60]}...")
+                    
                     # Detect language
                     try:
                         is_english, lang_confidence = language_detector.detect_english(url)
                     except:
                         is_english, lang_confidence = False, 0.0
                     
-                    # Detect delivery mode (online/offline/hybrid/bilingual)
+                    # Detect delivery mode
                     try:
                         delivery_mode, mode_confidence = language_detector.detect_delivery_mode(url)
                     except:
@@ -245,11 +263,9 @@ def search_programs(country: str, course: str):
                     
                     # Classify
                     try:
-                        level, ml_confidence = ml_classifier.classify(
-                            link_info.get('title', course)
-                        )
+                        level, ml_confidence = ml_classifier.classify(link_info.get('title', course))
                     except:
-                        level, ml_confidence = 'UG', 0.5  # Default fallback
+                        level, ml_confidence = 'UG', 0.5
                     
                     # Get metadata
                     try:
@@ -258,22 +274,18 @@ def search_programs(country: str, course: str):
                         metadata = {'content_hash': None, 'last_checked': datetime.utcnow()}
                     
                     # Create program
-                    # Check if delivery_mode column exists by trying to create with it
                     try:
-                        # First, try to add delivery_mode via raw SQL if column doesn't exist
                         from sqlalchemy import text
                         try:
                             session.execute(text("SELECT delivery_mode FROM programs LIMIT 1"))
                         except:
-                            # Column doesn't exist, add it
                             try:
                                 session.execute(text("ALTER TABLE programs ADD COLUMN delivery_mode VARCHAR"))
                                 session.execute(text("UPDATE programs SET delivery_mode = 'offline' WHERE delivery_mode IS NULL"))
                                 session.commit()
                             except:
-                                pass  # Column might already exist or table doesn't exist
+                                pass
                         
-                        # Now create program with delivery_mode
                         program = Program(
                             university_id=university.id,
                             course_name=course,
@@ -287,7 +299,6 @@ def search_programs(country: str, course: str):
                             confidence_score=str(ml_confidence)
                         )
                     except Exception as e:
-                        # Fallback: create without delivery_mode
                         logger.warning(f"Could not add delivery_mode: {e}")
                         program = Program(
                             university_id=university.id,
@@ -300,16 +311,14 @@ def search_programs(country: str, course: str):
                             last_checked=metadata.get('last_checked'),
                             confidence_score=str(ml_confidence)
                         )
+                    
                     session.add(program)
+                    session.commit()  # Commit immediately for real-time
                     
-                    # Get university info for display
-                    uni_translated = university.translated_name or university.original_name
-                    uni_original = university.original_name
-                    in_gotouni = university.exists_in_gotouniversity
-                    
-                    programs_found.append({
-                        "university_original": uni_original,
-                        "university_translated": uni_translated,
+                    # Add to results
+                    prog_data = {
+                        "university_original": uni_original,  # ORIGINAL NAME
+                        "university_translated": uni_translated,  # TRANSLATED NAME
                         "in_gotouniversity": in_gotouni,
                         "url": url,
                         "level": level,
@@ -317,19 +326,27 @@ def search_programs(country: str, course: str):
                         "delivery_mode": delivery_mode,
                         "confidence": ml_confidence,
                         "course_name": course
-                    })
+                    }
+                    uni_programs.append(prog_data)
+                    programs_found.append(prog_data)
+                    
+                    # Display in real-time
+                    if programs_found:
+                        df = pd.DataFrame(programs_found)
+                        results_container.dataframe(df, width='stretch', hide_index=True)
+                
+                # University complete
+                status_container.success(f"✅ [{idx+1}/{total_unis}] Completed {uni_original[:50]}: {len(uni_programs)} programs found")
+                
             except Exception as e:
                 logger.warning(f"Error processing {university.original_name}: {e}")
+                status_container.error(f"❌ Error processing {university.original_name}: {str(e)}")
                 continue
         
-        session.commit()
         session.close()
         
-        progress_bar.progress(100)
-        status_text.text("✅ Complete!")
-        time.sleep(0.5)
-        progress_bar.empty()
-        status_text.empty()
+        status_container.success(f"✅ Complete! Found {len(programs_found)} programs total")
+        time.sleep(1)
         
         ug_count = sum(1 for p in programs_found if p['level'] == 'UG')
         pg_count = sum(1 for p in programs_found if p['level'] == 'PG')
@@ -449,7 +466,6 @@ def main():
             if not country or not course:
                 st.warning("⚠️ Please enter both country and course name")
             else:
-                st.info(f"🔍 Searching for '{course}' programs in {country}. This may take 3-5 minutes...")
                 result, message = search_programs(country, course)
                 if result and result.get("total", 0) > 0:
                     st.success(f"✅ {message}")
@@ -466,16 +482,17 @@ def main():
                     if programs:
                         st.markdown(f"### 📋 Program Details ({len(programs)} programs)")
                         for i, prog in enumerate(programs, 1):
-                            uni_name = prog.get('university_translated') or prog.get('university_original', 'Unknown')
+                            uni_original = prog.get('university_original', 'Unknown')  # ORIGINAL
+                            uni_translated = prog.get('university_translated', uni_original)  # TRANSLATED
                             in_gotouni = prog.get('in_gotouniversity', False)
                             delivery = prog.get('delivery_mode', 'offline').title()
                             
-                            with st.expander(f"{i}. {uni_name} - {prog.get('level')} - {course}"):
+                            with st.expander(f"{i}. {uni_original} - {prog.get('level')} - {course}"):
                                 col1, col2 = st.columns(2)
                                 with col1:
                                     st.markdown("### 🏫 University Information")
-                                    st.write(f"**Original Name:** {prog.get('university_original', 'N/A')}")
-                                    st.write(f"**Translated Name:** {prog.get('university_translated', 'N/A')}")
+                                    st.write(f"**Original Name:** {uni_original}")
+                                    st.write(f"**Translated Name:** {uni_translated}")
                                     st.write(f"**In GotoUniversity:** {'✅ Yes' if in_gotouni else '❌ No'}")
                                     st.write(f"**Country:** {country}")
                                 with col2:
