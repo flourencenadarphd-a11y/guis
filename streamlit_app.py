@@ -29,6 +29,10 @@ import pandas as pd
 from typing import Dict, Optional
 import time
 from datetime import datetime
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Page config
 st.set_page_config(
@@ -122,10 +126,49 @@ def fetch_universities(country: str):
                 } for u in existing], f"Found {len(existing)} universities in database"
         
         # Fetch new universities
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        status_text.text("🔍 Searching Wikipedia and education portals...")
+        progress_bar.progress(10)
+        
         university_names = university_scraper.fetch_universities(country)
         
+        if not university_names:
+            if session:
+                session.close()
+            return None, f"No universities found for {country}. Try a different country name or check spelling."
+        
+        status_text.text(f"📝 Found {len(university_names)} universities. Processing...")
+        progress_bar.progress(30)
+        
         universities = []
-        for name in university_names[:20]:  # Limit to 20 for demo
+        total = min(len(university_names), 50)  # Increased limit
+        
+        for idx, name in enumerate(university_names[:total]):
+            try:
+                status_text.text(f"🔄 Processing: {name[:50]}... ({idx+1}/{total})")
+                progress_bar.progress(30 + int((idx / total) * 50))
+                
+                translated = translator.translate(name)
+                exists, matched_name, similarity = goto_uni_checker.check_exists(translated)
+                
+                if session:
+                    university = University(
+                        original_name=name,
+                        translated_name=translated,
+                        country=country,
+                        exists_in_gotouniversity=exists
+                    )
+                    session.add(university)
+                    universities.append({
+                        "original_name": name,
+                        "translated_name": translated,
+                        "exists_in_gotouniversity": exists
+                    })
+            except Exception as e:
+                logger.warning(f"Error processing {name}: {e}")
+                continue
             translated = translator.translate(name)
             exists, matched_name, similarity = goto_uni_checker.check_exists(translated)
             
@@ -147,7 +190,13 @@ def fetch_universities(country: str):
             session.commit()
             session.close()
         
-        return universities, f"Fetched {len(universities)} universities"
+        progress_bar.progress(100)
+        status_text.text("✅ Complete!")
+        time.sleep(0.5)
+        progress_bar.empty()
+        status_text.empty()
+        
+        return universities, f"✅ Successfully fetched and processed {len(universities)} universities"
     except Exception as e:
         if session:
             session.close()
@@ -169,15 +218,28 @@ def search_programs(country: str, course: str):
             return None, f"No universities found for {country}. Please fetch universities first."
         
         programs_found = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
         
-        for university in universities[:5]:  # Limit to 5 for demo
+        total_unis = min(len(universities), 10)  # Increased limit
+        
+        for idx, university in enumerate(universities[:total_unis]):
             try:
+                uni_name = university.translated_name or university.original_name
+                status_text.text(f"🔍 Searching {uni_name[:50]}... ({idx+1}/{total_unis})")
+                progress_bar.progress(int((idx / total_unis) * 50))
+                
                 course_links = course_scraper.search_courses(
-                    university.translated_name or university.original_name,
+                    uni_name,
                     course
                 )
                 
-                for link_info in course_links[:3]:  # Limit to 3 per university
+                if not course_links:
+                    continue
+                
+                status_text.text(f"✅ Found {len(course_links)} links. Processing...")
+                
+                for link_info in course_links[:5]:  # Increased limit
                     url = link_info['url']
                     
                     # Check if exists
@@ -186,15 +248,24 @@ def search_programs(country: str, course: str):
                         continue
                     
                     # Detect language
-                    is_english, confidence = language_detector.detect_english(url)
+                    try:
+                        is_english, lang_confidence = language_detector.detect_english(url)
+                    except:
+                        is_english, lang_confidence = False, 0.0
                     
                     # Classify
-                    level, ml_confidence = ml_classifier.classify(
-                        link_info.get('title', course)
-                    )
+                    try:
+                        level, ml_confidence = ml_classifier.classify(
+                            link_info.get('title', course)
+                        )
+                    except:
+                        level, ml_confidence = 'UG', 0.5  # Default fallback
                     
                     # Get metadata
-                    metadata = metadata_checker.check_metadata(url)
+                    try:
+                        metadata = metadata_checker.check_metadata(url)
+                    except:
+                        metadata = {'content_hash': None, 'last_checked': datetime.utcnow()}
                     
                     # Create program
                     program = Program(
@@ -218,20 +289,27 @@ def search_programs(country: str, course: str):
                         "confidence": ml_confidence
                     })
             except Exception as e:
+                logger.warning(f"Error processing {university.original_name}: {e}")
                 continue
         
         session.commit()
+        session.close()
+        
+        progress_bar.progress(100)
+        status_text.text("✅ Complete!")
+        time.sleep(0.5)
+        progress_bar.empty()
+        status_text.empty()
         
         ug_count = sum(1 for p in programs_found if p['level'] == 'UG')
         pg_count = sum(1 for p in programs_found if p['level'] == 'PG')
         
-        session.close()
         return {
             "total": len(programs_found),
             "ug_count": ug_count,
             "pg_count": pg_count,
             "programs": programs_found
-        }, f"Found {len(programs_found)} programs"
+        }, f"✅ Found {len(programs_found)} programs ({ug_count} UG, {pg_count} PG)"
     except Exception as e:
         if session:
             session.close()
@@ -313,43 +391,69 @@ def main():
         
         col1, col2 = st.columns(2)
         with col1:
-            fetch_btn = st.button("🔍 Fetch Universities", type="primary", use_container_width=True)
+            fetch_btn = st.button("🔍 Fetch Universities", type="primary", width='stretch')
         with col2:
-            search_btn = st.button("🔍 Search Programs", type="primary", use_container_width=True)
+            search_btn = st.button("🔍 Search Programs", type="primary", width='stretch')
         
         if fetch_btn and country:
-            with st.spinner(f"Fetching universities for {country}..."):
-                universities, message = fetch_universities(country)
-                if universities:
-                    st.success(f"✅ {message}")
-                    df = pd.DataFrame(universities)
-                    st.dataframe(df, use_container_width=True, hide_index=True)
-                else:
-                    st.error(message)
+            st.info(f"🔍 Starting search for universities in {country}. This may take 1-2 minutes...")
+            universities, message = fetch_universities(country)
+            if universities and len(universities) > 0:
+                st.success(f"✅ {message}")
+                st.markdown(f"### 📋 Found {len(universities)} Universities")
+                df = pd.DataFrame(universities)
+                st.dataframe(df, width='stretch', hide_index=True)
+                
+                # Show summary
+                gotouni_count = sum(1 for u in universities if u.get('exists_in_gotouniversity', False))
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Total Universities", len(universities))
+                with col2:
+                    st.metric("In GotoUni Database", gotouni_count)
+            else:
+                st.error(f"❌ {message}")
+                st.info("💡 Tips:\n- Try different country name (e.g., 'United States' instead of 'USA')\n- Check spelling\n- Some countries may have limited data")
         
         if search_btn and country and course:
-            with st.spinner(f"Searching for {course} in {country}..."):
+            if not country or not course:
+                st.warning("⚠️ Please enter both country and course name")
+            else:
+                st.info(f"🔍 Searching for '{course}' programs in {country}. This may take 3-5 minutes...")
                 result, message = search_programs(country, course)
-                if result:
+                if result and result.get("total", 0) > 0:
                     st.success(f"✅ {message}")
+                    
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        st.metric("Total", result.get("total", 0))
+                        st.metric("📚 Total Programs", result.get("total", 0))
                     with col2:
-                        st.metric("UG", result.get("ug_count", 0))
+                        st.metric("🎓 Undergraduate", result.get("ug_count", 0))
                     with col3:
-                        st.metric("PG", result.get("pg_count", 0))
+                        st.metric("🎯 Postgraduate", result.get("pg_count", 0))
                     
                     programs = result.get("programs", [])
                     if programs:
+                        st.markdown(f"### 📋 Program Details ({len(programs)} programs)")
                         for i, prog in enumerate(programs, 1):
-                            with st.expander(f"{i}. {prog.get('university')} - {prog.get('level')}"):
+                            with st.expander(f"{i}. {prog.get('university')} - {prog.get('level')} - {course}"):
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    st.write(f"**University:** {prog.get('university')}")
+                                    st.write(f"**Course:** {course}")
+                                    st.write(f"**Level:** {prog.get('level')}")
+                                with col2:
+                                    st.write(f"**Language:** {'✅ English' if prog.get('taught_in_english') else '❌ Non-English'}")
+                                    st.write(f"**ML Confidence:** {prog.get('confidence', 0):.1%}")
+                                    if prog.get('url'):
+                                        st.markdown(f"[🔗 Open Program Page]({prog.get('url')})")
                                 st.write(f"**URL:** {prog.get('url')}")
-                                st.write(f"**Level:** {prog.get('level')}")
-                                st.write(f"**English:** {'✅ Yes' if prog.get('taught_in_english') else '❌ No'}")
-                                st.write(f"**Confidence:** {prog.get('confidence', 0):.2%}")
                 else:
-                    st.error(message)
+                    st.error(f"❌ {message}")
+                    if "No universities found" in message:
+                        st.info("💡 **Tip**: First fetch universities for this country using the 'Fetch Universities' button above.")
+                    else:
+                        st.info("💡 **Tips**:\n- Make sure universities are fetched first\n- Try different course keywords\n- Some universities may not have public course pages")
     
     # Tab 2: Programs
     with tab2:
@@ -372,7 +476,23 @@ def main():
                     })
                 
                 df = pd.DataFrame(display_data)
-                st.dataframe(df, use_container_width=True, hide_index=True)
+                st.dataframe(df, width='stretch', hide_index=True)
+                
+                # Add visit tracking
+                st.markdown("### 📋 Program Actions")
+                for program in programs:
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.write(f"**{program.university.translated_name or program.university.original_name}** - {program.course_name}")
+                    with col2:
+                        if not program.visited:
+                            if st.button("✅ Mark Visited", key=f"visit_{program.id}"):
+                                program.visited = True
+                                session.commit()
+                                st.success("✅ Marked as visited!")
+                                st.rerun()
+                        else:
+                            st.success("✅ Visited")
             else:
                 st.info("No programs found. Use the Search tab to find programs.")
             session.close()
