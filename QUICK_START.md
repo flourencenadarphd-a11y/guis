@@ -51,7 +51,6 @@ streamlit run app.py
 For detailed usage, see [USAGE_GUIDE.md](USAGE_GUIDE.md)
 
 ---
-
 ## 🎯 Common First Steps
 
 1. ✅ Check connection status in sidebar (should be green)
