@@ -169,22 +169,6 @@ def fetch_universities(country: str):
             except Exception as e:
                 logger.warning(f"Error processing {name}: {e}")
                 continue
-            translated = translator.translate(name)
-            exists, matched_name, similarity = goto_uni_checker.check_exists(translated)
-            
-            if session:
-                university = University(
-                    original_name=name,
-                    translated_name=translated,
-                    country=country,
-                    exists_in_gotouniversity=exists
-                )
-                session.add(university)
-                universities.append({
-                    "original_name": name,
-                    "translated_name": translated,
-                    "exists_in_gotouniversity": exists
-                })
         
         if session:
             session.commit()

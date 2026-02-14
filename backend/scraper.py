@@ -45,51 +45,83 @@ class UniversityScraper:
         return list(set(cleaned))  # Remove duplicates
     
     def _fetch_from_wikipedia(self, country: str) -> List[str]:
-        """Fetch universities from Wikipedia"""
-        universities = []
+        """Fetch universities from Wikipedia - IMPROVED to get ALL universities"""
+        universities = set()
         try:
             # Wikipedia list format: "List of universities in [Country]"
             search_terms = [
-                f"List of universities in {country}",
-                f"Universities in {country}",
-                f"List of universities and colleges in {country}"
+                f"List_of_universities_in_{country.replace(' ', '_')}",
+                f"List_of_universities_and_colleges_in_{country.replace(' ', '_')}",
+                f"Universities_in_{country.replace(' ', '_')}",
+                f"List_of_higher_education_institutions_in_{country.replace(' ', '_')}"
             ]
             
             for term in search_terms:
-                url = f"https://en.wikipedia.org/wiki/{term.replace(' ', '_')}"
+                url = f"https://en.wikipedia.org/wiki/{term}"
                 try:
                     response = self._make_request(url)
                     if response and response.status_code == 200:
                         soup = BeautifulSoup(response.content, 'html.parser')
                         
-                        # Find table rows or list items
-                        tables = soup.find_all('table', class_='wikitable')
-                        for table in tables:
+                        # Method 1: Find ALL tables (not just wikitable class)
+                        all_tables = soup.find_all('table')
+                        for table in all_tables:
                             rows = table.find_all('tr')
                             for row in rows[1:]:  # Skip header
                                 cells = row.find_all(['td', 'th'])
-                                if cells:
-                                    # Usually first or second cell contains university name
-                                    name_cell = cells[0] if len(cells) > 0 else None
-                                    if name_cell:
-                                        link = name_cell.find('a')
-                                        if link:
-                                            name = link.get_text(strip=True)
-                                            if name and len(name) > 3:
-                                                universities.append(name)
+                                for cell in cells[:3]:  # Check first 3 cells
+                                    # Look for links
+                                    links = cell.find_all('a')
+                                    for link in links:
+                                        name = link.get_text(strip=True)
+                                        href = link.get('href', '')
+                                        # Filter for university-related links
+                                        if name and len(name) > 3:
+                                            name_lower = name.lower()
+                                            if any(keyword in name_lower for keyword in ['university', 'college', 'institute', 'academy', 'school']):
+                                                universities.add(name)
+                                            # Also check if href suggests it's a university page
+                                            elif '/wiki/' in href and any(keyword in href.lower() for keyword in ['university', 'college', 'institute']):
+                                                universities.add(name)
                         
-                        # Also check unordered lists
-                        lists = soup.find_all(['ul', 'ol'])
-                        for ul in lists:
+                        # Method 2: Check ALL lists more thoroughly
+                        all_lists = soup.find_all(['ul', 'ol'])
+                        for ul in all_lists:
                             items = ul.find_all('li')
                             for item in items:
-                                link = item.find('a')
-                                if link:
+                                # Get all links in the item
+                                links = item.find_all('a')
+                                for link in links:
                                     name = link.get_text(strip=True)
-                                    if 'university' in name.lower() or 'college' in name.lower():
-                                        universities.append(name)
+                                    href = link.get('href', '')
+                                    if name and len(name) > 3:
+                                        name_lower = name.lower()
+                                        # More lenient matching
+                                        if any(keyword in name_lower for keyword in ['university', 'college', 'institute', 'academy', 'school', 'universität', 'université', 'universidad']):
+                                            universities.add(name)
+                                        elif '/wiki/' in href:
+                                            # Check if it's likely a university page
+                                            href_lower = href.lower()
+                                            if any(keyword in href_lower for keyword in ['university', 'college', 'institute', 'academy']):
+                                                universities.add(name)
+                        
+                        # Method 3: Look for divs with university lists
+                        content_divs = soup.find_all('div', class_=['mw-parser-output', 'mw-content-ltr'])
+                        for div in content_divs:
+                            # Find all links that might be universities
+                            links = div.find_all('a', href=True)
+                            for link in links:
+                                name = link.get_text(strip=True)
+                                href = link.get('href', '')
+                                if name and len(name) > 5 and '/wiki/' in href:
+                                    name_lower = name.lower()
+                                    href_lower = href.lower()
+                                    # Check if it's a university-related page
+                                    if any(keyword in name_lower or keyword in href_lower for keyword in ['university', 'college', 'institute', 'academy']):
+                                        universities.add(name)
                         
                         if universities:
+                            logger.info(f"Found {len(universities)} universities from {term}")
                             break  # Found universities, no need to try other terms
                 except Exception as e:
                     logger.warning(f"Error fetching from Wikipedia for {term}: {e}")
@@ -97,7 +129,7 @@ class UniversityScraper:
         except Exception as e:
             logger.error(f"Error in Wikipedia fetch: {e}")
         
-        return universities
+        return list(universities)
     
     def _fetch_country_specific(self, country: str) -> List[str]:
         """Fetch from country-specific education portals"""
@@ -186,20 +218,71 @@ class CourseScraper:
         return validated_links
     
     def _guess_university_url(self, university_name: str) -> Optional[str]:
-        """Try to guess university website URL"""
+        """Try to guess university website URL - IMPROVED with more patterns"""
         # Common patterns
         name_lower = university_name.lower()
         name_clean = re.sub(r'[^a-z0-9\s]', '', name_lower)
-        name_parts = name_clean.split()
+        name_parts = [p for p in name_clean.split() if len(p) > 2]  # Filter short words
         
-        # Try common domain patterns
-        patterns = [
-            f"https://www.{name_parts[0]}.edu",
-            f"https://www.{name_parts[0]}.ac.{name_parts[-1] if len(name_parts) > 1 else 'uk'}",
-            f"https://{name_parts[0]}.edu",
-            f"https://www.{'-'.join(name_parts[:2])}.edu" if len(name_parts) >= 2 else None
-        ]
+        if not name_parts:
+            return None
         
+        # Try common domain patterns - EXPANDED
+        patterns = []
+        
+        # US/International patterns
+        if len(name_parts) >= 1:
+            patterns.extend([
+                f"https://www.{name_parts[0]}.edu",
+                f"https://{name_parts[0]}.edu",
+                f"https://www.{name_parts[0]}.ac.uk",
+                f"https://{name_parts[0]}.ac.uk",
+            ])
+        
+        if len(name_parts) >= 2:
+            patterns.extend([
+                f"https://www.{'-'.join(name_parts[:2])}.edu",
+                f"https://{'-'.join(name_parts[:2])}.edu",
+                f"https://www.{name_parts[0]}{name_parts[1]}.edu",
+                f"https://{name_parts[0]}{name_parts[1]}.edu",
+            ])
+        
+        # European patterns
+        if len(name_parts) >= 1:
+            patterns.extend([
+                f"https://www.{name_parts[0]}.ac.at",  # Austria
+                f"https://www.{name_parts[0]}.ac.de",  # Germany
+                f"https://www.{name_parts[0]}.ac.fr",  # France
+                f"https://www.{name_parts[0]}.university",
+                f"https://{name_parts[0]}.university",
+            ])
+        
+        # Try Wikipedia to get official URL
+        try:
+            wiki_url = f"https://en.wikipedia.org/wiki/{university_name.replace(' ', '_')}"
+            response = self._make_request(wiki_url)
+            if response and response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'html.parser')
+                # Look for official website link
+                infobox = soup.find('table', class_='infobox')
+                if infobox:
+                    links = infobox.find_all('a', href=True)
+                    for link in links:
+                        href = link.get('href', '')
+                        text = link.get_text(strip=True).lower()
+                        if 'website' in text or 'official' in text:
+                            if href.startswith('http'):
+                                return href
+                        # Also check for .edu, .ac.uk, etc.
+                        if any(domain in href for domain in ['.edu', '.ac.uk', '.ac.', '.university']):
+                            if href.startswith('http'):
+                                return href
+                            elif href.startswith('//'):
+                                return 'https:' + href
+        except:
+            pass
+        
+        # Try patterns
         for pattern in patterns:
             if pattern:
                 try:
@@ -237,11 +320,18 @@ class CourseScraper:
         return links
     
     def _search_via_search_page(self, base_url: str, keyword: str) -> List[Dict[str, str]]:
-        """Search via website search functionality"""
+        """Search via website search functionality - IMPROVED"""
+        from urllib.parse import quote
+        
+        keyword_encoded = quote(keyword)
         search_urls = [
-            urljoin(base_url, f'/search?q={keyword}'),
-            urljoin(base_url, f'/search/?query={keyword}'),
-            urljoin(base_url, f'/programs/search?q={keyword}')
+            urljoin(base_url, f'/search?q={keyword_encoded}'),
+            urljoin(base_url, f'/search/?query={keyword_encoded}'),
+            urljoin(base_url, f'/search?query={keyword_encoded}'),
+            urljoin(base_url, f'/programs/search?q={keyword_encoded}'),
+            urljoin(base_url, f'/courses/search?q={keyword_encoded}'),
+            urljoin(base_url, f'/study/search?q={keyword_encoded}'),
+            urljoin(base_url, f'/academics/search?q={keyword_encoded}'),
         ]
         
         links = []
@@ -250,31 +340,49 @@ class CourseScraper:
                 response = self._make_request(search_url)
                 if response and response.status_code == 200:
                     soup = BeautifulSoup(response.content, 'html.parser')
-                    # Find links in search results
+                    # Find links in search results - more thorough
                     result_links = soup.find_all('a', href=True)
                     for link in result_links:
                         href = link.get('href')
                         text = link.get_text(strip=True)
-                        if href and keyword.lower() in (href.lower() + text.lower()):
-                            full_url = urljoin(base_url, href)
-                            links.append({'url': full_url, 'title': text or href})
+                        if href:
+                            keyword_lower = keyword.lower()
+                            href_lower = href.lower()
+                            text_lower = text.lower()
+                            
+                            # More lenient matching
+                            if (keyword_lower in href_lower or 
+                                keyword_lower in text_lower or
+                                any(word in href_lower for word in keyword_lower.split()) or
+                                any(word in text_lower for word in keyword_lower.split())):
+                                full_url = urljoin(base_url, href)
+                                # Avoid duplicates and non-program pages
+                                if full_url not in [l['url'] for l in links]:
+                                    if any(term in href_lower for term in ['program', 'course', 'degree', 'study', 'academic']):
+                                        links.append({'url': full_url, 'title': text or href})
             except Exception as e:
                 logger.debug(f"Search page failed: {e}")
         
         return links
     
     def _crawl_common_paths(self, base_url: str, keyword: str) -> List[Dict[str, str]]:
-        """Crawl common program/course paths"""
+        """Crawl common program/course paths - IMPROVED"""
         common_paths = [
-            '/programs',
-            '/courses',
-            '/study',
-            '/academics',
-            '/departments',
-            '/faculties'
+            '/programs', '/programmes', '/program',
+            '/courses', '/course',
+            '/study', '/studies', '/studying',
+            '/academics', '/academic',
+            '/departments', '/department',
+            '/faculties', '/faculty',
+            '/degrees', '/degree',
+            '/undergraduate', '/graduate',
+            '/bachelor', '/master',
         ]
         
         links = []
+        keyword_lower = keyword.lower()
+        keyword_words = keyword_lower.split()
+        
         for path in common_paths:
             try:
                 url = urljoin(base_url, path)
@@ -288,9 +396,20 @@ class CourseScraper:
                         href_lower = href.lower() if href else ""
                         text_lower = text.lower() if text else ""
                         
-                        if keyword.lower() in (href_lower + text_lower):
+                        # More lenient matching
+                        matches = (
+                            keyword_lower in (href_lower + text_lower) or
+                            any(word in href_lower for word in keyword_words) or
+                            any(word in text_lower for word in keyword_words)
+                        )
+                        
+                        if matches:
                             full_url = urljoin(url, href)
-                            links.append({'url': full_url, 'title': text or href})
+                            # Avoid duplicates
+                            if full_url not in [l['url'] for l in links]:
+                                # Prefer program-related links
+                                if any(term in href_lower for term in ['program', 'course', 'degree', 'study', 'bachelor', 'master']):
+                                    links.append({'url': full_url, 'title': text or href})
             except Exception as e:
                 logger.debug(f"Crawl path {path} failed: {e}")
         
