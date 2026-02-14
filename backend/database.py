@@ -35,6 +35,7 @@ class Program(Base):
     program_url = Column(String, nullable=False, unique=True, index=True)
     level = Column(String, nullable=False, index=True)  # UG or PG
     taught_in_english = Column(Boolean, default=False)
+    delivery_mode = Column(String, default="offline")  # online, offline, hybrid, bilingual
     visited = Column(Boolean, default=False)
     content_hash = Column(String, index=True)  # SHA256 hash
     embedding_vector = Column(LargeBinary)  # Stored as bytes
@@ -61,7 +62,26 @@ class Database:
         self.db_path = db_path
         self.engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
         Base.metadata.create_all(bind=self.engine)
+        
+        # Add delivery_mode column if it doesn't exist (migration)
+        self._migrate_database()
+        
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
+    
+    def _migrate_database(self):
+        """Add new columns to existing database if needed"""
+        try:
+            from sqlalchemy import inspect, text
+            inspector = inspect(self.engine)
+            columns = [col['name'] for col in inspector.get_columns('programs')]
+            
+            if 'delivery_mode' not in columns:
+                with self.engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE programs ADD COLUMN delivery_mode VARCHAR DEFAULT 'offline'"))
+                    conn.commit()
+        except Exception as e:
+            # Column might already exist or table doesn't exist yet
+            pass
     
     def get_session(self):
         """Get database session"""

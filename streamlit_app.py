@@ -143,9 +143,9 @@ def fetch_universities(country: str):
         progress_bar.progress(30)
         
         universities = []
-        total = min(len(university_names), 50)  # Increased limit
+        total = len(university_names)  # Process ALL universities
         
-        for idx, name in enumerate(university_names[:total]):
+        for idx, name in enumerate(university_names):
             try:
                 status_text.text(f"🔄 Processing: {name[:50]}... ({idx+1}/{total})")
                 progress_bar.progress(30 + int((idx / total) * 50))
@@ -221,9 +221,9 @@ def search_programs(country: str, course: str):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        total_unis = min(len(universities), 10)  # Increased limit
+        total_unis = len(universities)  # Process ALL universities
         
-        for idx, university in enumerate(universities[:total_unis]):
+        for idx, university in enumerate(universities):
             try:
                 uni_name = university.translated_name or university.original_name
                 status_text.text(f"🔍 Searching {uni_name[:50]}... ({idx+1}/{total_unis})")
@@ -239,7 +239,7 @@ def search_programs(country: str, course: str):
                 
                 status_text.text(f"✅ Found {len(course_links)} links. Processing...")
                 
-                for link_info in course_links[:5]:  # Increased limit
+                for link_info in course_links:  # Process ALL links
                     url = link_info['url']
                     
                     # Check if exists
@@ -252,6 +252,12 @@ def search_programs(country: str, course: str):
                         is_english, lang_confidence = language_detector.detect_english(url)
                     except:
                         is_english, lang_confidence = False, 0.0
+                    
+                    # Detect delivery mode (online/offline/hybrid/bilingual)
+                    try:
+                        delivery_mode, mode_confidence = language_detector.detect_delivery_mode(url)
+                    except:
+                        delivery_mode, mode_confidence = "offline", 0.0
                     
                     # Classify
                     try:
@@ -274,6 +280,7 @@ def search_programs(country: str, course: str):
                         program_url=url,
                         level=level,
                         taught_in_english=is_english,
+                        delivery_mode=delivery_mode,
                         visited=False,
                         content_hash=metadata.get('content_hash'),
                         last_checked=metadata.get('last_checked'),
@@ -281,12 +288,21 @@ def search_programs(country: str, course: str):
                     )
                     session.add(program)
                     
+                    # Get university info for display
+                    uni_translated = university.translated_name or university.original_name
+                    uni_original = university.original_name
+                    in_gotouni = university.exists_in_gotouniversity
+                    
                     programs_found.append({
-                        "university": university.translated_name or university.original_name,
+                        "university_original": uni_original,
+                        "university_translated": uni_translated,
+                        "in_gotouniversity": in_gotouni,
                         "url": url,
                         "level": level,
                         "taught_in_english": is_english,
-                        "confidence": ml_confidence
+                        "delivery_mode": delivery_mode,
+                        "confidence": ml_confidence,
+                        "course_name": course
                     })
             except Exception as e:
                 logger.warning(f"Error processing {university.original_name}: {e}")
@@ -436,18 +452,31 @@ def main():
                     if programs:
                         st.markdown(f"### 📋 Program Details ({len(programs)} programs)")
                         for i, prog in enumerate(programs, 1):
-                            with st.expander(f"{i}. {prog.get('university')} - {prog.get('level')} - {course}"):
+                            uni_name = prog.get('university_translated') or prog.get('university_original', 'Unknown')
+                            in_gotouni = prog.get('in_gotouniversity', False)
+                            delivery = prog.get('delivery_mode', 'offline').title()
+                            
+                            with st.expander(f"{i}. {uni_name} - {prog.get('level')} - {course}"):
                                 col1, col2 = st.columns(2)
                                 with col1:
-                                    st.write(f"**University:** {prog.get('university')}")
+                                    st.markdown("### 🏫 University Information")
+                                    st.write(f"**Original Name:** {prog.get('university_original', 'N/A')}")
+                                    st.write(f"**Translated Name:** {prog.get('university_translated', 'N/A')}")
+                                    st.write(f"**In GotoUniversity:** {'✅ Yes' if in_gotouni else '❌ No'}")
+                                    st.write(f"**Country:** {country}")
+                                with col2:
+                                    st.markdown("### 📚 Program Information")
                                     st.write(f"**Course:** {course}")
                                     st.write(f"**Level:** {prog.get('level')}")
-                                with col2:
                                     st.write(f"**Language:** {'✅ English' if prog.get('taught_in_english') else '❌ Non-English'}")
+                                    st.write(f"**Delivery Mode:** {delivery}")
                                     st.write(f"**ML Confidence:** {prog.get('confidence', 0):.1%}")
-                                    if prog.get('url'):
-                                        st.markdown(f"[🔗 Open Program Page]({prog.get('url')})")
-                                st.write(f"**URL:** {prog.get('url')}")
+                                
+                                st.markdown("### 🔗 Program URL")
+                                if prog.get('url'):
+                                    st.markdown(f"[{prog.get('url')}]({prog.get('url')})")
+                                else:
+                                    st.write("N/A")
                 else:
                     st.error(f"❌ {message}")
                     if "No universities found" in message:
@@ -467,10 +496,14 @@ def main():
                 for program in programs:
                     uni = program.university
                     display_data.append({
-                        "University": uni.translated_name or uni.original_name,
+                        "ID": program.id,
+                        "University (Original)": uni.original_name,
+                        "University (Translated)": uni.translated_name or uni.original_name,
+                        "In GotoUni": "✅" if uni.exists_in_gotouniversity else "❌",
                         "Course": program.course_name,
                         "Level": program.level,
-                        "English": "✅" if program.taught_in_english else "❌",
+                        "Language": "✅ English" if program.taught_in_english else "❌ Non-English",
+                        "Delivery": getattr(program, 'delivery_mode', 'offline').title(),
                         "Visited": "🟢" if program.visited else "🔴",
                         "URL": program.program_url[:50] + "..." if len(program.program_url) > 50 else program.program_url
                     })

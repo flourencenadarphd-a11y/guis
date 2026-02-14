@@ -22,6 +22,65 @@ class LanguageDetector:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
     
+    def detect_delivery_mode(self, url: str) -> Tuple[str, float]:
+        """
+        Detect delivery mode: online, offline, hybrid, or bilingual
+        Returns: (mode: str, confidence: float)
+        """
+        try:
+            response = self.session.get(url, timeout=self.timeout)
+            if response.status_code != 200:
+                return "offline", 0.5
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            page_text = soup.get_text().lower()
+            
+            # Online indicators
+            online_keywords = [
+                'online', 'distance learning', 'remote', 'virtual', 'e-learning',
+                'web-based', 'digital', 'asynchronous', 'synchronous online'
+            ]
+            
+            # Offline indicators
+            offline_keywords = [
+                'on-campus', 'on campus', 'in-person', 'in person', 'campus-based',
+                'residential', 'face-to-face', 'physical attendance'
+            ]
+            
+            # Hybrid indicators
+            hybrid_keywords = [
+                'hybrid', 'blended', 'mixed mode', 'flexible learning',
+                'combination', 'part online part offline'
+            ]
+            
+            # Bilingual indicators
+            bilingual_keywords = [
+                'bilingual', 'dual language', 'two languages', 'english and',
+                'taught in english and', 'multilingual'
+            ]
+            
+            online_count = sum(1 for keyword in online_keywords if keyword in page_text)
+            offline_count = sum(1 for keyword in offline_keywords if keyword in page_text)
+            hybrid_count = sum(1 for keyword in hybrid_keywords if keyword in page_text)
+            bilingual_count = sum(1 for keyword in bilingual_keywords if keyword in page_text)
+            
+            # Determine mode
+            if bilingual_count > 0:
+                return "bilingual", min(0.9, 0.5 + (bilingual_count * 0.1))
+            elif hybrid_count > 0:
+                return "hybrid", min(0.9, 0.5 + (hybrid_count * 0.1))
+            elif online_count > offline_count and online_count > 0:
+                return "online", min(0.9, 0.5 + (online_count * 0.1))
+            elif offline_count > 0:
+                return "offline", min(0.9, 0.5 + (offline_count * 0.1))
+            else:
+                # Default to offline if no indicators found
+                return "offline", 0.3
+        
+        except Exception as e:
+            logger.warning(f"Delivery mode detection error for {url}: {e}")
+            return "offline", 0.0
+    
     def detect_english(self, url: str) -> Tuple[bool, float]:
         """
         Detect if program is taught in English
